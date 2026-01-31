@@ -39,7 +39,8 @@ import { PEN_TYPES } from "../global/penStyles";
 import drawingService from "../services/drawingService";
 import { useAuth } from "../hooks/useAuth";
 
-export default function useCanvas() {  const {
+export default function useCanvas() {
+  const {
     selectedTool,
     setSelectedTool,
     tools,
@@ -63,7 +64,7 @@ export default function useCanvas() {  const {
     selectionBounds,
     setSelectionBounds,
     undo,
-    redo,    textInputMode,
+    redo, textInputMode,
     setTextInputMode,
     handleTouchStart,
     handleTouchMove,
@@ -82,12 +83,12 @@ export default function useCanvas() {  const {
   const dimension = useDimension();
   const [isInElement, setIsInElement] = useState(false);
   const [inCorner, setInCorner] = useState(false);
-  const [padding, setPadding] = useState(minmax(10 / scale, [0.5, 50]));  const [cursor, setCursor] = useState("default");
+  const [padding, setPadding] = useState(minmax(10 / scale, [0.5, 50])); const [cursor, setCursor] = useState("default");
   const [mouseAction, setMouseAction] = useState({ x: 0, y: 0 });
   const [initialSelectedElements, setInitialSelectedElements] = useState([]);
   const [resizeOldDementions, setResizeOldDementions] = useState(null)
   const [isDrawing, setIsDrawing] = useState(false);
-  
+
   // Eraser trail state
   const [eraserTrail, setEraserTrail] = useState([]);
   const eraserTrailRef = useRef([]); // Ref to keep track of trail points for animation
@@ -103,145 +104,120 @@ export default function useCanvas() {  const {
   const translateAnimationRef = useRef(null);
   const lastTranslateUpdate = useRef(0);
 
- // Track if we're currently handling a received update
-const isReceivingUpdate = useRef(false);
-// const lastSentElements = useRef(null);
-// const pendingUpdates = useRef([]);
-const lastSentHash = useRef(null);
-const socketConnected = useRef(false);
+  // Track if we're currently handling a received update
+  const isReceivingUpdate = useRef(false);
+  // const lastSentElements = useRef(null);
+  // const pendingUpdates = useRef([]);
+  const lastSentHash = useRef(null);
+  const socketConnected = useRef(false);
 
-const joinedRoomRef = useRef(null); // Keep track of the room we've successfully joined
+  const joinedRoomRef = useRef(null); // Keep track of the room we've successfully joined
 
 
 
-// Effect for tracking socket connection status
-useEffect(() => {
-  const handleConnect = () => {
-    console.log("[Canvas] Socket connected");
-    socketConnected.current = true;
-    if (session) {
-      console.log("[Canvas] Re-joining room after reconnect:", session);
+  // Effect for tracking socket connection status
+  useEffect(() => {
+    const handleConnect = () => {
+      console.log("[Canvas] Socket connected");
+      socketConnected.current = true;
+      if (session) {
+        console.log("[Canvas] Re-joining room after reconnect:", session);
+        socket.emit("join", session);
+      }
+    };
+
+    const handleDisconnect = () => {
+      console.log("[Canvas] Socket disconnected");
+      socketConnected.current = false;
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+
+    // Initial status
+    socketConnected.current = socket.connected;
+    console.log("[Canvas] Initial socket connection status:", socketConnected.current);
+
+    return () => {
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+    };
+  }, [session]);
+
+  // Simple hash function to check if elements array has changed
+  const hashElements = (elements) => {
+    if (!elements) return "";
+    try {
+      return JSON.stringify(elements.map(el => ({ id: el.id, lastModified: el.lastModified || Date.now() })));
+    } catch (err) {
+      console.error("[Canvas] Error hashing elements:", err);
+      return Date.now().toString(); // Fallback
+    }
+  };
+
+  // Effect to handle sending element updates to the server (Socket + REST Fallback)
+  // Create a throttled saver instance
+  const throttledSave = useMemo(() => drawingService.createThrottledSave(1000), []);
+
+  useEffect(() => {
+    // console.log("[Canvas Send] Running with isReceivingUpdate:", isReceivingUpdate.current);
+
+    // Don't send while receiving updates or if not in a session
+    if (isReceivingUpdate.current || !session) return;
+
+    // Don't send if elements are invalid
+    if (!elements || !Array.isArray(elements)) return;
+
+    // Calculate a hash to avoid duplicate sends
+    const currentHash = hashElements(elements);
+    if (currentHash === lastSentHash.current) return;
+
+    // 1. Socket Update (Best Effort for Real-time)
+    if (socketConnected.current) {
+      socket.emit("getElements", { elements, room: session });
+    }
+
+    // 2. REST API Update (Persistence Fallback)
+    // Always save to DB to ensure persistence even if socket is flaky or stateless
+    throttledSave(session, elements).catch(err => console.error("[Canvas] Auto-save failed:", err));
+
+    lastSentHash.current = currentHash;
+
+  }, [elements, session, throttledSave]);
+
+
+  // Effect to handle receiving updates and Initial Load
+  useEffect(() => {
+    if (!session) return;
+
+    const handleSetElements = (receivedElements) => {
+      if (!receivedElements || !Array.isArray(receivedElements)) return;
+      isReceivingUpdate.current = true;
+      setElements(receivedElements, true, false);
+      setTimeout(() => { isReceivingUpdate.current = false; }, 100);
+    };
+
+    socket.on("setElements", handleSetElements);
+
+    // Join via Socket
+    if (socket.connected) {
       socket.emit("join", session);
     }
-  };
-  
-  const handleDisconnect = () => {
-    console.log("[Canvas] Socket disconnected");
-    socketConnected.current = false;
-  };
 
-  socket.on("connect", handleConnect);
-  socket.on("disconnect", handleDisconnect);
-  
-  // Initial status
-  socketConnected.current = socket.connected;
-  console.log("[Canvas] Initial socket connection status:", socketConnected.current);
+    // FALLBACK: Load from REST API on join (Crucial for Vercel/Stateless)
+    drawingService.getDrawing(session).then(drawing => {
+      if (drawing && drawing.data && Array.isArray(drawing.data)) {
+        console.log("[Canvas Load] Loaded initial data from REST API");
+        handleSetElements(drawing.data);
+      }
+    }).catch(err => console.log("[Canvas Load] No existing drawing found or error:", err));
 
-  return () => {
-    socket.off("connect", handleConnect);
-    socket.off("disconnect", handleDisconnect);
-  };
-}, [session]);
+    return () => {
+      socket.off("setElements", handleSetElements);
+    };
+  }, [session, setElements]);
 
-// Simple hash function to check if elements array has changed
-const hashElements = (elements) => {
-  if (!elements) return "";
-  try {
-    return JSON.stringify(elements.map(el => ({ id: el.id, lastModified: el.lastModified || Date.now() })));
-  } catch (err) {
-    console.error("[Canvas] Error hashing elements:", err);
-    return Date.now().toString(); // Fallback
-  }
-};
-
-// Effect to handle sending element updates to the server
-useEffect(() => {
-  console.log("[Canvas Send] Running with isReceivingUpdate:", isReceivingUpdate.current);
-  
-  // Don't send while receiving updates or if not in a session
-  if (isReceivingUpdate.current || !session) return;
-  
-  // Don't send if socket not connected
-  if (!socketConnected.current) {
-    console.log("[Canvas Send] Socket not connected, can't send update");
-    return;
-  }
-  
-  // Don't send if elements are invalid
-  if (!elements || !Array.isArray(elements)) {
-    console.log("[Canvas Send] Elements invalid, can't send");
-    return;
-  }
-  
-  // Calculate a hash to avoid duplicate sends
-  const currentHash = hashElements(elements);
-  if (currentHash === lastSentHash.current) {
-    // console.log("[Canvas Send] Hash unchanged, skipping send");
-    return;
-  }
-  
-  console.log("[Canvas Send] Scheduling element update send");
-  const timer = setTimeout(() => {
-    if (socket.connected) {
-      console.log(`[Canvas Send] Emitting ${elements.length} elements to room ${session}`);
-      socket.emit("getElements", { elements, room: session });
-      lastSentHash.current = currentHash;
-    } else {
-      console.log("[Canvas Send] Socket not connected when trying to send");
-    }
-  }, 50);
-  
-  return () => clearTimeout(timer);
-}, [elements, session]);
-
-
-// Effect to handle receiving updates from the server
-useEffect(() => {
-  if (!session) {
-    console.log("[Canvas Receive] No session, not setting up listener");
-    return;
-  }
-  
-  console.log("[Canvas Receive] Setting up 'setElements' listener for session:", session);
-  
-  const handleSetElements = (receivedElements) => {
-    console.log(`[Canvas Receive] Got ${receivedElements?.length || 0} elements`);
-    
-    if (!receivedElements || !Array.isArray(receivedElements)) {
-      console.log("[Canvas Receive] Invalid elements received");
-      return;
-    }
-    
-    isReceivingUpdate.current = true;
-    console.log("[Canvas Receive] Set isReceivingUpdate to true");
-    
-    // Use the setElements from context with correct parameters
-    setElements(receivedElements, true, false);
-    
-    // Reset the receiving flag after a short delay
-    setTimeout(() => {
-      isReceivingUpdate.current = false;
-      console.log("[Canvas Receive] Reset isReceivingUpdate to false");
-    }, 100);
-  };
-  
-  socket.on("setElements", handleSetElements);
-  
-  // Join the session when this effect runs
-  if (socket.connected) {
-    console.log(`[Canvas Receive] Joining room ${session}`);
-    socket.emit("join", session); 
-  } else {
-    console.log("[Canvas Receive] Socket not connected, can't join room");
-  }
-  
-  return () => {
-    console.log("[Canvas Receive] Removing 'setElements' listener");
-    socket.off("setElements", handleSetElements);
-  };
-}, [session, setElements]);
-
-    // Helper function to get tool by number (1-12)
+  // Helper function to get tool by number (1-12)
   const getToolByNumber = (number) => {
     let toolCounter = 0;
     for (const toolGroup of tools) {
@@ -301,17 +277,17 @@ useEffect(() => {
 
   const handleContextMenu = (event) => {
     event.preventDefault(); // Prevent browser's default context menu
-    
+
     const { clientX, clientY } = mousePosition(event);
     setCurrentMousePosition({ x: clientX, y: clientY });
-    
+
     // Close any existing context menu first
     setContextMenu(null);
-    
+
     // Use screen coordinates for menu positioning
     const screenX = event.clientX;
     const screenY = event.clientY;
-    
+
     // Check if right-clicking on a selected element
     const elementUnderCursor = elements.find(element => {
       const { x1, y1, x2, y2 } = element;
@@ -319,12 +295,12 @@ useEffect(() => {
       const maxX = Math.max(x1, x2);
       const minY = Math.min(y1, y2);
       const maxY = Math.max(y1, y2);
-      
+
       return clientX >= minX && clientX <= maxX && clientY >= minY && clientY <= maxY;
     });
-    
+
     let contextType = 'canvas';
-    
+
     if (elementUnderCursor) {
       // If we clicked on an element
       if (selectedElements && selectedElements.length > 1 && selectedElements.some(el => el.id === elementUnderCursor.id)) {
@@ -345,7 +321,7 @@ useEffect(() => {
         contextType = 'single';
       }
     }
-    
+
     // Show context menu with a small delay to ensure proper positioning
     setTimeout(() => {
       setContextMenu({
@@ -369,14 +345,14 @@ useEffect(() => {
       return;
     }
 
-      // Handle text tool click-to-add (PRIORITY - before lockUI)
+    // Handle text tool click-to-add (PRIORITY - before lockUI)
     if (selectedTool === "text") {
       // Use direct screen coordinates for fixed positioning
-      setTextInputMode({ 
-        x: event.clientX, 
-        y: event.clientY, 
-        canvasX: clientX, 
-        canvasY: clientY 
+      setTextInputMode({
+        x: event.clientX,
+        y: event.clientY,
+        canvasX: clientX,
+        canvasY: clientY
       });
       return;
     }    // Handle sticky note tool click-to-add directly (PRIORITY - before lockUI)
@@ -400,16 +376,16 @@ useEffect(() => {
       element.textColor = "#333333";
 
       setElements((prevState) => [...prevState, element]);
-      
+
       if (!lockTool) {
         setSelectedTool("selection");
         setSelectedElement(element);
       }
-      
+
       return;
     }
 
-    lockUI(true);if (inCorner) {
+    lockUI(true); if (inCorner) {
       setResizeOldDementions(getElementById(selectedElement.id, elements))
       setElements((prevState) => prevState);
       setMouseAction({ x: clientX, y: clientY }); // Use transformed canvas coordinates
@@ -441,11 +417,12 @@ useEffect(() => {
           duplicateElement(element, setElements, setSelectedElement, 0, {
             offsetX,
             offsetY,
-          });        } else {
+          });
+        } else {
           // Check if element is already in selection
-          const isElementSelected = selectedElements && Array.isArray(selectedElements) ? 
+          const isElementSelected = selectedElements && Array.isArray(selectedElements) ?
             selectedElements.some(sel => sel.id === element.id) : false;
-          
+
           if (event.shiftKey) {
             // Toggle element in selection
             if (isElementSelected) {
@@ -487,7 +464,8 @@ useEffect(() => {
           setSelectedElements([]);
         }
         setSelectionBounds({ x1: clientX, y1: clientY, x2: clientX, y2: clientY });
-        setAction("selecting");      }      return;
+        setAction("selecting");
+      } return;
     }
 
     // Handle image tool click-to-upload
@@ -530,7 +508,7 @@ useEffect(() => {
     }
 
     setAction("draw");
-      // Handle draw tool for freehand drawing
+    // Handle draw tool for freehand drawing
     if (selectedTool === "draw") {
       setIsDrawing(true);      // Special handling for laser pointer - use trail instead of elements
       if (selectedPen === PEN_TYPES.LASER) {
@@ -567,277 +545,281 @@ useEffect(() => {
         clientY,
         clientX,
         clientY,
-        style, 
+        style,
         selectedTool
       );
       setElements((prevState) => [...prevState, element]);
     }
-  };  const handleMouseMove = (event) => {
+  }; const handleMouseMove = (event) => {
     try {
       // Smart throttling: more responsive during collaboration, balanced for solo use
       const now = performance.now();
       const isCollaborating = !!session;
       const throttleInterval = isCollaborating ? 8 : 12; // Faster throttling for more responsive dragging
-      
+
       // Reduce throttling during move operations for smoother dragging
       const isMoving = action === "move";
       const moveThrottleInterval = isCollaborating ? 4 : 8;
       const currentThrottle = isMoving ? moveThrottleInterval : throttleInterval;
-      
+
       if (now - lastUpdateTime.current < currentThrottle) {
         return;
       }
       lastUpdateTime.current = now;
-      
+
       const { clientX, clientY } = mousePosition(event);
 
-    // Update current mouse position for paste functionality
-    setCurrentMousePosition({ x: clientX, y: clientY });
+      // Update current mouse position for paste functionality
+      setCurrentMousePosition({ x: clientX, y: clientY });
 
-    if (action === "erasing" && selectedTool === "eraser") {
-      // Add point to eraser trail for animation
-      const currentTime = Date.now();
-      eraserTrailRef.current = [
-        ...eraserTrailRef.current,
-        { x: clientX, y: clientY, time: currentTime },
-      ].filter(p => currentTime - p.time < 500); // Keep points for 500ms
-      setEraserTrail(eraserTrailRef.current);
+      if (action === "erasing" && selectedTool === "eraser") {
+        // Add point to eraser trail for animation
+        const currentTime = Date.now();
+        eraserTrailRef.current = [
+          ...eraserTrailRef.current,
+          { x: clientX, y: clientY, time: currentTime },
+        ].filter(p => currentTime - p.time < 500); // Keep points for 500ms
+        setEraserTrail(eraserTrailRef.current);
 
-      // Perform erasing logic
-      const elementsToKeep = [];
-      let wasElementErased = false;
-      elements.forEach(element => {
-        // For 'draw' elements, check if any point is near the eraser path
-        if (element.tool === "draw" && element.points && element.points.length > 0) {
-          const distanceToEraser = element.points.some(p => 
-            Math.sqrt(Math.pow(p.x - clientX, 2) + Math.pow(p.y - clientY, 2)) < (element.strokeWidth / 2 + 10) // 10 is eraser radius
-          );
-          if (distanceToEraser) {
-            wasElementErased = true;
-            // Potentially, for partial erase of drawn lines, one might modify points here
-            // For now, we erase the whole element if any part is touched
+        // Perform erasing logic
+        const elementsToKeep = [];
+        let wasElementErased = false;
+        elements.forEach(element => {
+          // For 'draw' elements, check if any point is near the eraser path
+          if (element.tool === "draw" && element.points && element.points.length > 0) {
+            const distanceToEraser = element.points.some(p =>
+              Math.sqrt(Math.pow(p.x - clientX, 2) + Math.pow(p.y - clientY, 2)) < (element.strokeWidth / 2 + 10) // 10 is eraser radius
+            );
+            if (distanceToEraser) {
+              wasElementErased = true;
+              // Potentially, for partial erase of drawn lines, one might modify points here
+              // For now, we erase the whole element if any part is touched
+            } else {
+              elementsToKeep.push(element);
+            }
           } else {
-            elementsToKeep.push(element);
-          }
-        } else {
-          // For other shapes, check if eraser is within their bounding box
-          // More precise collision (e.g. isWithinElement) can be used here
-          const { x1, y1, x2, y2 } = element;
-          const eraserRadius = 10; // Effective radius of the eraser
-          const withinX = clientX > Math.min(x1,x2) - eraserRadius && clientX < Math.max(x1,x2) + eraserRadius;
-          const withinY = clientY > Math.min(y1,y2) - eraserRadius && clientY < Math.max(y1,y2) + eraserRadius;
+            // For other shapes, check if eraser is within their bounding box
+            // More precise collision (e.g. isWithinElement) can be used here
+            const { x1, y1, x2, y2 } = element;
+            const eraserRadius = 10; // Effective radius of the eraser
+            const withinX = clientX > Math.min(x1, x2) - eraserRadius && clientX < Math.max(x1, x2) + eraserRadius;
+            const withinY = clientY > Math.min(y1, y2) - eraserRadius && clientY < Math.max(y1, y2) + eraserRadius;
 
-          if (withinX && withinY && isWithinElement(clientX, clientY, element)) { // Use isWithinElement for better accuracy
-            wasElementErased = true;
-          } else {
-            elementsToKeep.push(element);
+            if (withinX && withinY && isWithinElement(clientX, clientY, element)) { // Use isWithinElement for better accuracy
+              wasElementErased = true;
+            } else {
+              elementsToKeep.push(element);
+            }
           }
+        });
+
+        if (wasElementErased) {
+          setElements(elementsToKeep);
         }
-      });
-
-      if (wasElementErased) {
-        setElements(elementsToKeep);
-      }
-      return; // Prevent other mouse move actions when erasing
-    }
-
-    if (selectedElement) {
-      setInCorner(
-        inSelectedCorner(
-          getElementById(selectedElement.id, elements),
-          clientX,
-          clientY,
-          padding,
-          scale
-        )
-      );
-    }
-
-    if (getElementPosition(clientX, clientY, elements)) {
-      setIsInElement(true);
-    } else {
-      setIsInElement(false);
-    }    if (action == "draw") {
-      // Special handling for laser pointer - add to trail instead of element
-      if (selectedTool === "draw" && selectedPen === PEN_TYPES.LASER) {
-        addLaserPoint(clientX, clientY);
-        return; // Don't update elements for laser pointer
+        return; // Prevent other mouse move actions when erasing
       }
 
-      const element = elements.at(-1); // Get the current element being drawn
-      if (!element) return; // Should not happen if isDrawing is true
-      const { id } = element;
-      
-      if (selectedTool === "draw" && isDrawing) {
-        // Add point to freehand path for regular pens
-        // Ensure element.points exists and is an array
-        const currentPoints = element.points || [];
-        
-        // Create new point
-        const newPoint = { x: clientX, y: clientY };
-        
-        const newPoints = [...currentPoints, newPoint];
-        
-        // Update element with new points and adjust bounding box (x2, y2)
-        // The bounding box for 'draw' elements is derived from points in canvas.js,
-        // but x2, y2 can be used for rough culling or initial bounds.
-        updateElement(
-          id,
-          { 
-            points: newPoints, 
-            x2: clientX, // Update x2 and y2 to expand the bounding box
-            y2: clientY  // if necessary, though min/max of points is more accurate
-          },
-          setElements,
-          true
-        );
-      } else if (selectedTool !== "draw") { // For regular shapes being drawn
-        // Regular shape drawing
-        updateElement(
-          id,
-          { x2: clientX, y2: clientY },
-          setElements,
-          true
+      if (selectedElement) {
+        setInCorner(
+          inSelectedCorner(
+            getElementById(selectedElement.id, elements),
+            clientX,
+            clientY,
+            padding,
+            scale
+          )
         );
       }
-    } else if (action == "selecting") {
-      // Update marquee selection bounds
-      setSelectionBounds(prev => ({
-        ...prev,
-        x2: clientX,
-        y2: clientY
-      }));    } else if (action == "move") {      if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1 && initialSelectedElements && Array.isArray(initialSelectedElements) && initialSelectedElements.length > 0) {        // Multi-element movement: calculate delta from initial mouse position
-        const deltaX = clientX - mouseAction.x;
-        const deltaY = clientY - mouseAction.y;
 
-        // Batch update all selected elements at once to prevent race conditions
-        setElements((prevState) => {
-          // Additional safety check to prevent crashes during heavy dragging
-          if (!prevState || !Array.isArray(prevState)) {
-            return prevState;
-          }
-          
-          return prevState.map((element) => {
-            if (!element || !element.id) return element;
-            
-            const initialElement = initialSelectedElements.find(init => init && init.id === element.id);
-            if (initialElement) {
-              // Ensure coordinates are valid numbers
-              const validX1 = isFinite(initialElement.x1) ? initialElement.x1 : element.x1;
-              const validY1 = isFinite(initialElement.y1) ? initialElement.y1 : element.y1;
-              const validX2 = isFinite(initialElement.x2) ? initialElement.x2 : element.x2;
-              const validY2 = isFinite(initialElement.y2) ? initialElement.y2 : element.y2;
-              
-              const updatedElement = {
-                ...element,
-                x1: validX1 + deltaX,
-                y1: validY1 + deltaY,
-                x2: validX2 + deltaX,
-                y2: validY2 + deltaY
-              };
-              
-              // For draw tool elements, also move all points in the drawing path
-              if (element.tool === "draw" && initialElement.points && Array.isArray(initialElement.points) && initialElement.points.length > 0) {
-                updatedElement.points = initialElement.points.map(point => ({
-                  x: point.x + deltaX,
-                  y: point.y + deltaY
-                }));
-              }
-              
-              return updatedElement;
-            }
-            return element;
-          });
-        });        // Update selectedElements positions in real-time during drag to clear past position blue marks
-        setSelectedElements(prevSelected => 
-          prevSelected.map(selectedEl => {
-            const initialElement = initialSelectedElements.find(init => init && init.id === selectedEl.id);
-            if (initialElement) {
-              // Ensure coordinates are valid numbers
-              const validX1 = isFinite(initialElement.x1) ? initialElement.x1 : selectedEl.x1;
-              const validY1 = isFinite(initialElement.y1) ? initialElement.y1 : selectedEl.y1;
-              const validX2 = isFinite(initialElement.x2) ? initialElement.x2 : selectedEl.x2;
-              const validY2 = isFinite(initialElement.y2) ? initialElement.y2 : selectedEl.y2;
-              
-              const updatedSelectedElement = {
-                ...selectedEl,
-                x1: validX1 + deltaX,
-                y1: validY1 + deltaY,
-                x2: validX2 + deltaX,
-                y2: validY2 + deltaY
-              };
-              
-              // For draw tool elements, also move all points in the selected element
-              if (selectedEl.tool === "draw" && initialElement.points && Array.isArray(initialElement.points) && initialElement.points.length > 0) {
-                updatedSelectedElement.points = initialElement.points.map(point => ({
-                  x: point.x + deltaX,
-                  y: point.y + deltaY
-                }));
-              }
-              
-              return updatedSelectedElement;
-            }
-            return selectedEl;
-          })
-        );} else {
-        // Single element movement
-        const { offsetX, offsetY } = selectedElement;
-        const currentX = clientX - offsetX;
-        const currentY = clientY - offsetY;
-        const element = getElementById(selectedElement.id, elements);
-        
-        if (element) {
-          const deltaX = currentX - element.x1;
-          const deltaY = currentY - element.y1;
-          
-          // Use moveElement to handle all element types including draw tools
-          const movedElement = moveElement(element, deltaX, deltaY);
-          
+      if (getElementPosition(clientX, clientY, elements)) {
+        setIsInElement(true);
+      } else {
+        setIsInElement(false);
+      } if (action == "draw") {
+        // Special handling for laser pointer - add to trail instead of element
+        if (selectedTool === "draw" && selectedPen === PEN_TYPES.LASER) {
+          addLaserPoint(clientX, clientY);
+          return; // Don't update elements for laser pointer
+        }
+
+        const element = elements.at(-1); // Get the current element being drawn
+        if (!element) return; // Should not happen if isDrawing is true
+        const { id } = element;
+
+        if (selectedTool === "draw" && isDrawing) {
+          // Add point to freehand path for regular pens
+          // Ensure element.points exists and is an array
+          const currentPoints = element.points || [];
+
+          // Create new point
+          const newPoint = { x: clientX, y: clientY };
+
+          const newPoints = [...currentPoints, newPoint];
+
+          // Update element with new points and adjust bounding box (x2, y2)
+          // The bounding box for 'draw' elements is derived from points in canvas.js,
+          // but x2, y2 can be used for rough culling or initial bounds.
           updateElement(
-            element.id,
-            movedElement,
+            id,
+            {
+              points: newPoints,
+              x2: clientX, // Update x2 and y2 to expand the bounding box
+              y2: clientY  // if necessary, though min/max of points is more accurate
+            },
+            setElements,
+            true
+          );
+        } else if (selectedTool !== "draw") { // For regular shapes being drawn
+          // Regular shape drawing
+          updateElement(
+            id,
+            { x2: clientX, y2: clientY },
             setElements,
             true
           );
         }
-      }    } else if (action == "translate") {
-      const now = performance.now();
-      const isCollaborating = !!session;
-      const translateThrottle = isCollaborating ? 12 : 16; // More responsive during collaboration
-      
-      // Throttle translate updates for smooth dragging
-      if (now - lastTranslateUpdate.current < translateThrottle) {
-        return;
-      }
-      lastTranslateUpdate.current = now;
-      
-      const x = clientX - translate.sx;
-      const y = clientY - translate.sy;
-
-      // Use requestAnimationFrame for smooth translate updates
-      if (translateAnimationRef.current) {
-        cancelAnimationFrame(translateAnimationRef.current);
-      }
-      
-      translateAnimationRef.current = requestAnimationFrame(() => {
-        setTranslate((prevState) => ({
-          ...prevState,
-          x: prevState.x + x,
-          y: prevState.y + y,
+      } else if (action == "selecting") {
+        // Update marquee selection bounds
+        setSelectionBounds(prev => ({
+          ...prev,
+          x2: clientX,
+          y2: clientY
         }));
-      });
-    }else if (action.startsWith("resize")) {
-      const resizeCorner = action.slice(7, 9);
-      const resizeType = action.slice(10) || "default";
-      const s_element = getElementById(selectedElement.id, elements);
+      } else if (action == "move") {
+        if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1 && initialSelectedElements && Array.isArray(initialSelectedElements) && initialSelectedElements.length > 0) {        // Multi-element movement: calculate delta from initial mouse position
+          const deltaX = clientX - mouseAction.x;
+          const deltaY = clientY - mouseAction.y;
 
-      updateElement(
-        s_element.id,
-        resizeValue(resizeCorner, resizeType, clientX, clientY, padding, s_element, mouseAction, resizeOldDementions),
-        setElements,
-        true
-      );
-    }
+          // Batch update all selected elements at once to prevent race conditions
+          setElements((prevState) => {
+            // Additional safety check to prevent crashes during heavy dragging
+            if (!prevState || !Array.isArray(prevState)) {
+              return prevState;
+            }
+
+            return prevState.map((element) => {
+              if (!element || !element.id) return element;
+
+              const initialElement = initialSelectedElements.find(init => init && init.id === element.id);
+              if (initialElement) {
+                // Ensure coordinates are valid numbers
+                const validX1 = isFinite(initialElement.x1) ? initialElement.x1 : element.x1;
+                const validY1 = isFinite(initialElement.y1) ? initialElement.y1 : element.y1;
+                const validX2 = isFinite(initialElement.x2) ? initialElement.x2 : element.x2;
+                const validY2 = isFinite(initialElement.y2) ? initialElement.y2 : element.y2;
+
+                const updatedElement = {
+                  ...element,
+                  x1: validX1 + deltaX,
+                  y1: validY1 + deltaY,
+                  x2: validX2 + deltaX,
+                  y2: validY2 + deltaY
+                };
+
+                // For draw tool elements, also move all points in the drawing path
+                if (element.tool === "draw" && initialElement.points && Array.isArray(initialElement.points) && initialElement.points.length > 0) {
+                  updatedElement.points = initialElement.points.map(point => ({
+                    x: point.x + deltaX,
+                    y: point.y + deltaY
+                  }));
+                }
+
+                return updatedElement;
+              }
+              return element;
+            });
+          });        // Update selectedElements positions in real-time during drag to clear past position blue marks
+          setSelectedElements(prevSelected =>
+            prevSelected.map(selectedEl => {
+              const initialElement = initialSelectedElements.find(init => init && init.id === selectedEl.id);
+              if (initialElement) {
+                // Ensure coordinates are valid numbers
+                const validX1 = isFinite(initialElement.x1) ? initialElement.x1 : selectedEl.x1;
+                const validY1 = isFinite(initialElement.y1) ? initialElement.y1 : selectedEl.y1;
+                const validX2 = isFinite(initialElement.x2) ? initialElement.x2 : selectedEl.x2;
+                const validY2 = isFinite(initialElement.y2) ? initialElement.y2 : selectedEl.y2;
+
+                const updatedSelectedElement = {
+                  ...selectedEl,
+                  x1: validX1 + deltaX,
+                  y1: validY1 + deltaY,
+                  x2: validX2 + deltaX,
+                  y2: validY2 + deltaY
+                };
+
+                // For draw tool elements, also move all points in the selected element
+                if (selectedEl.tool === "draw" && initialElement.points && Array.isArray(initialElement.points) && initialElement.points.length > 0) {
+                  updatedSelectedElement.points = initialElement.points.map(point => ({
+                    x: point.x + deltaX,
+                    y: point.y + deltaY
+                  }));
+                }
+
+                return updatedSelectedElement;
+              }
+              return selectedEl;
+            })
+          );
+        } else {
+          // Single element movement
+          const { offsetX, offsetY } = selectedElement;
+          const currentX = clientX - offsetX;
+          const currentY = clientY - offsetY;
+          const element = getElementById(selectedElement.id, elements);
+
+          if (element) {
+            const deltaX = currentX - element.x1;
+            const deltaY = currentY - element.y1;
+
+            // Use moveElement to handle all element types including draw tools
+            const movedElement = moveElement(element, deltaX, deltaY);
+
+            updateElement(
+              element.id,
+              movedElement,
+              setElements,
+              true
+            );
+          }
+        }
+      } else if (action == "translate") {
+        const now = performance.now();
+        const isCollaborating = !!session;
+        const translateThrottle = isCollaborating ? 12 : 16; // More responsive during collaboration
+
+        // Throttle translate updates for smooth dragging
+        if (now - lastTranslateUpdate.current < translateThrottle) {
+          return;
+        }
+        lastTranslateUpdate.current = now;
+
+        const x = clientX - translate.sx;
+        const y = clientY - translate.sy;
+
+        // Use requestAnimationFrame for smooth translate updates
+        if (translateAnimationRef.current) {
+          cancelAnimationFrame(translateAnimationRef.current);
+        }
+
+        translateAnimationRef.current = requestAnimationFrame(() => {
+          setTranslate((prevState) => ({
+            ...prevState,
+            x: prevState.x + x,
+            y: prevState.y + y,
+          }));
+        });
+      } else if (action.startsWith("resize")) {
+        const resizeCorner = action.slice(7, 9);
+        const resizeType = action.slice(10) || "default";
+        const s_element = getElementById(selectedElement.id, elements);
+
+        updateElement(
+          s_element.id,
+          resizeValue(resizeCorner, resizeType, clientX, clientY, padding, s_element, mouseAction, resizeOldDementions),
+          setElements,
+          true
+        );
+      }
     } catch (error) {
       console.error('Error in handleMouseMove:', error);
       // Gracefully handle the error by resetting action if needed
@@ -865,7 +847,7 @@ useEffect(() => {
       }
       setAction("none");
       return;
-    }    if (currentAction === "draw") {      // Special handling for laser pointer
+    } if (currentAction === "draw") {      // Special handling for laser pointer
       if (currentSelectedTool === "draw" && currentSelectedPen === PEN_TYPES.LASER) {
         setIsDrawing(false);
         // Don't clear the trail - let it fade out naturally
@@ -879,7 +861,7 @@ useEffect(() => {
       }
 
       const drawnElement = elements.at(-1);
-      
+
       // If not locked, switch back to selection tool
       if (!lockTool) {
         setSelectedTool("selection");
@@ -912,7 +894,7 @@ useEffect(() => {
       lockUI(false);
       return;
     }
-    
+
     setAction("none");
     lockUI(false);    // Clear initial positions after movement
     if (currentAction == "move") {
@@ -931,7 +913,8 @@ useEffect(() => {
     const { clientX, clientY } = mousePosition(event);
     if (clientX == mouseAction.x && clientY == mouseAction.y && currentAction !== "move") {
       setElements("prevState");
-      return;    }
+      return;
+    }
 
     if (currentAction == "draw") {
       if (selectedTool === "draw") {
@@ -946,24 +929,25 @@ useEffect(() => {
           const maxX = Math.max(...xCoords);
           const minY = Math.min(...yCoords);
           const maxY = Math.max(...yCoords);
-            updateElement(
+          updateElement(
             lastElement.id,
             { x1: minX, y1: minY, x2: maxX, y2: maxY },
             setElements,
             true
           );
-        }      } else {
+        }
+      } else {
         // Regular shape drawing
         const lastElement = elements.at(-1);
         const { id, x1, y1, x2, y2 } = adjustCoordinates(lastElement);
         updateElement(id, { x1, x2, y1, y2 }, setElements, /* elements, */ false);
       }
-      
+
       if (!lockTool) {
         setSelectedTool("selection");
         setSelectedElement(elements.at(-1));
       }
-    }    if (currentAction.startsWith("resize")) {
+    } if (currentAction.startsWith("resize")) {
       const { id, x1, y1, x2, y2 } = adjustCoordinates(
         getElementById(selectedElement.id, elements)
       );
@@ -981,28 +965,28 @@ useEffect(() => {
     lastWheelTime.current = now;
 
     // Detect if this is a zoom gesture (Ctrl+wheel or pinch on trackpad)
-    const isZoomGesture = event.ctrlKey || event.metaKey || 
-                         (Math.abs(event.deltaY) > 0 && event.deltaX === 0 && event.deltaZ === 0);
-    
+    const isZoomGesture = event.ctrlKey || event.metaKey ||
+      (Math.abs(event.deltaY) > 0 && event.deltaX === 0 && event.deltaZ === 0);
+
     if (isZoomGesture) {
       event.preventDefault();
-      
+
       // More sensitive zoom calculation for precise control
       let zoomFactor = -event.deltaY * 0.001;
-      
+
       // Adjust zoom sensitivity based on deltaMode
       if (event.deltaMode === 1) { // DOM_DELTA_LINE
         zoomFactor *= 16;
       } else if (event.deltaMode === 2) { // DOM_DELTA_PAGE
         zoomFactor *= 400;
       }
-      
+
       // Get mouse position relative to the canvas
       const rect = canvasRef.current?.getBoundingClientRect();
       if (rect) {
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
-        
+
         // Use debounced zoom for smooth performance
         debouncedZoom(zoomFactor, mouseX, mouseY);
       }
@@ -1012,7 +996,7 @@ useEffect(() => {
     // Handle panning with momentum
     const deltaX = event.deltaX * 0.5;
     const deltaY = event.deltaY * 0.5;
-    
+
     // Apply immediate translation
     setTranslate((prevState) => ({
       ...prevState,
@@ -1038,14 +1022,14 @@ useEffect(() => {
           x: prevState.x - momentumRef.current.x * 0.1,
           y: prevState.y - momentumRef.current.y * 0.1,
         }));
-        
+
         momentumRef.current.x *= 0.95;
         momentumRef.current.y *= 0.95;
-        
+
         requestAnimationFrame(applyMomentum);
       }
     };
-    
+
     if (timeDelta > 100) {
       requestAnimationFrame(applyMomentum);
     }
@@ -1146,16 +1130,16 @@ useEffect(() => {
     const keyDownFunction = (event) => {
       const { key, ctrlKey, metaKey, shiftKey } = event;
       const prevent = () => event.preventDefault();
-      
+
       // Skip keyboard shortcuts if user is typing in text input
       if (textInputMode) {
         return;
       }
-      
+
       // Skip if user is typing in any input field
       const activeElement = document.activeElement;
       if (activeElement && (
-        activeElement.tagName === 'INPUT' || 
+        activeElement.tagName === 'INPUT' ||
         activeElement.tagName === 'TEXTAREA' ||
         activeElement.contentEditable === 'true'
       )) {
@@ -1163,7 +1147,7 @@ useEffect(() => {
       }      // Handle tool number shortcuts (1-9, 0 for tool 10, -, = for tools 11-12)
       if (!ctrlKey && !metaKey && !shiftKey) {
         let toolNumber = null;
-        
+
         if (key >= '1' && key <= '9') {
           toolNumber = parseInt(key);
         } else if (key === '0') {
@@ -1173,17 +1157,18 @@ useEffect(() => {
         } else if (key === '=') {
           toolNumber = 12;
         }
-        
+
         if (toolNumber) {
           const tool = getToolByNumber(toolNumber);
-            if (tool) {
+          if (tool) {
             prevent();
             tool.toolAction(tool.slug);
             return;
           }
         }
       }        // Handle multi-selection shortcuts
-      if (ctrlKey || metaKey) {        if (key.toLowerCase() === "a") {
+      if (ctrlKey || metaKey) {
+        if (key.toLowerCase() === "a") {
           prevent();
           // Select all elements
           setSelectedElements(elements);
@@ -1204,14 +1189,14 @@ useEffect(() => {
         if (key.toLowerCase() === "v") {
           prevent();
           // Use current mouse position for paste location, fallback to center if no position tracked
-          const pastePosition = currentMousePosition.x !== 0 || currentMousePosition.y !== 0 
+          const pastePosition = currentMousePosition.x !== 0 || currentMousePosition.y !== 0
             ? { x: currentMousePosition.x, y: currentMousePosition.y }
             : { x: dimension.width / 2 / scale, y: dimension.height / 2 / scale }; // Fallback to canvas center
           pasteElements(setElements, setSelectedElements, setSelectedElement, pastePosition);
           return;
         }
       }
-        // Handle delete for multi-selection
+      // Handle delete for multi-selection
       if (key === "Backspace" || key === "Delete") {
         if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
           prevent();
@@ -1222,7 +1207,8 @@ useEffect(() => {
           deleteElement(selectedElement, setElements, setSelectedElement);
           return;
         }
-      }      if (selectedElement) {        if (ctrlKey && key.toLowerCase() == "d") {
+      } if (selectedElement) {
+        if (ctrlKey && key.toLowerCase() == "d") {
           prevent();
           if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
             duplicateMultipleElements(selectedElements, setElements, setSelectedElements, 10);
@@ -1234,11 +1220,11 @@ useEffect(() => {
               10
             );
           }
-        }if (key == "ArrowLeft") {
+        } if (key == "ArrowLeft") {
           prevent();
           if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
             // Multi-element arrow movement
-            setElements(prevState => 
+            setElements(prevState =>
               prevState.map(element => {
                 const selectedEl = selectedElements.find(sel => sel.id === element.id);
                 if (selectedEl) {
@@ -1248,17 +1234,17 @@ useEffect(() => {
               })
             );
             // Update selectedElements state to reflect new positions
-            setSelectedElements(prevSelected => 
+            setSelectedElements(prevSelected =>
               prevSelected.map(sel => moveElement(sel, -1, 0))
             );
           } else {
             arrowMove(selectedElement, -1, 0, setElements);
           }
-        }        if (key == "ArrowUp") {
+        } if (key == "ArrowUp") {
           prevent();
           if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
             // Multi-element arrow movement
-            setElements(prevState => 
+            setElements(prevState =>
               prevState.map(element => {
                 const selectedEl = selectedElements.find(sel => sel.id === element.id);
                 if (selectedEl) {
@@ -1268,17 +1254,17 @@ useEffect(() => {
               })
             );
             // Update selectedElements state to reflect new positions
-            setSelectedElements(prevSelected => 
+            setSelectedElements(prevSelected =>
               prevSelected.map(sel => moveElement(sel, 0, -1))
             );
           } else {
             arrowMove(selectedElement, 0, -1, setElements);
           }
-        }        if (key == "ArrowRight") {
+        } if (key == "ArrowRight") {
           prevent();
           if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
             // Multi-element arrow movement
-            setElements(prevState => 
+            setElements(prevState =>
               prevState.map(element => {
                 const selectedEl = selectedElements.find(sel => sel.id === element.id);
                 if (selectedEl) {
@@ -1288,17 +1274,17 @@ useEffect(() => {
               })
             );
             // Update selectedElements state to reflect new positions
-            setSelectedElements(prevSelected => 
+            setSelectedElements(prevSelected =>
               prevSelected.map(sel => moveElement(sel, 1, 0))
             );
           } else {
             arrowMove(selectedElement, 1, 0, setElements);
           }
-        }        if (key == "ArrowDown") {
+        } if (key == "ArrowDown") {
           prevent();
           if (selectedElements && Array.isArray(selectedElements) && selectedElements.length > 1) {
             // Multi-element arrow movement
-            setElements(prevState => 
+            setElements(prevState =>
               prevState.map(element => {
                 const selectedEl = selectedElements.find(sel => sel.id === element.id);
                 if (selectedEl) {
@@ -1308,14 +1294,14 @@ useEffect(() => {
               })
             );
             // Update selectedElements state to reflect new positions
-            setSelectedElements(prevSelected => 
+            setSelectedElements(prevSelected =>
               prevSelected.map(sel => moveElement(sel, 0, 1))
             );
           } else {
             arrowMove(selectedElement, 0, 1, setElements);
           }
         }
-      }      if (ctrlKey || metaKey) {
+      } if (ctrlKey || metaKey) {
         if (
           key.toLowerCase() == "y" ||
           (key.toLowerCase() == "z" && shiftKey)
@@ -1330,7 +1316,8 @@ useEffect(() => {
           saveElements(elements);
         } else if (key.toLowerCase() == "o") {
           prevent();
-          uploadElements(setElements);        } else if (key === "=" || key === "+") {
+          uploadElements(setElements);
+        } else if (key === "=" || key === "+") {
           // Ctrl++ or Ctrl+= for zoom in
           prevent();
           onZoom(0.1, null, null, { animate: true });
@@ -1348,7 +1335,7 @@ useEffect(() => {
           onZoom("fit");
         }
       }
-    };    window.addEventListener("keydown", keyDownFunction, { passive: false });
+    }; window.addEventListener("keydown", keyDownFunction, { passive: false });
     return () => {
       window.removeEventListener("keydown", keyDownFunction);
     };
@@ -1362,7 +1349,7 @@ useEffect(() => {
   }, [selectedTool, setSelectedElement, setSelectedElements]);  // Cursor management useEffect
   useEffect(() => {
     console.log("Cursor effect triggered - selectedTool:", selectedTool, "action:", action);
-    
+
     if (action == "translate") {
       document.documentElement.style.setProperty("--canvas-cursor", "grabbing");
       console.log("Set cursor to: grabbing");
@@ -1390,7 +1377,8 @@ useEffect(() => {
       console.log("Set cursor to: copy (rectangle)");
     } else if (selectedTool === "circle") {
       document.documentElement.style.setProperty("--canvas-cursor", "cell");
-      console.log("Set cursor to: cell (circle)");    } else if (selectedTool === "diamond") {
+      console.log("Set cursor to: cell (circle)");
+    } else if (selectedTool === "diamond") {
       document.documentElement.style.setProperty("--canvas-cursor", "url('data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><defs><linearGradient id=\"diamondGrad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"%23e3f2fd\"/><stop offset=\"50%\" stop-color=\"%23bbdefb\"/><stop offset=\"100%\" stop-color=\"%2390caf9\"/></linearGradient></defs><path d=\"M12 3l7 6-7 12-7-12z\" fill=\"url(%23diamondGrad)\" stroke=\"%232196f3\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/><path d=\"M12 3l7 6h-14z\" fill=\"%23ffffff\" fill-opacity=\"0.3\"/><path d=\"M5 9l7 12 7-12\" stroke=\"%232196f3\" stroke-width=\"0.5\" fill=\"none\"/></svg>') 12 12, crosshair");
       console.log("Set cursor to: enhanced diamond SVG");
     } else if (selectedTool === "arrow") {
@@ -1401,7 +1389,8 @@ useEffect(() => {
       console.log("Set cursor to: row-resize (line)");
     } else if (selectedTool === "stickyNote") {
       document.documentElement.style.setProperty("--canvas-cursor", "text");
-      console.log("Set cursor to: text (stickyNote)");    } else if (selectedTool === "image") {
+      console.log("Set cursor to: text (stickyNote)");
+    } else if (selectedTool === "image") {
       document.documentElement.style.setProperty("--canvas-cursor", "url('data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\" fill=\"%23f0f0f0\" stroke=\"%23333\" stroke-width=\"1.5\"/><path d=\"M8 11l2 2 4-4 6 6v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-1z\" fill=\"%23ddd\"/><circle cx=\"8.5\" cy=\"9.5\" r=\"1.5\" fill=\"%23bbb\"/><circle cx=\"18\" cy=\"6\" r=\"4\" fill=\"%2300aa00\" stroke=\"%23fff\" stroke-width=\"1\"/><path d=\"M16 6h4M18 4v4\" stroke=\"%23fff\" stroke-width=\"1.5\" stroke-linecap=\"round\"/></svg>') 12 12, crosshair");
       console.log("Set cursor to: custom image with plus SVG");
     } else if (selectedTool !== "selection") {
@@ -1417,7 +1406,7 @@ useEffect(() => {
       document.documentElement.style.setProperty("--canvas-cursor", "default");
       console.log("Set cursor to: default");
     }
-    
+
     // Also log the actual CSS value that was set
     const actualCursorValue = document.documentElement.style.getPropertyValue("--canvas-cursor");
     console.log("Actual cursor value set:", actualCursorValue);
@@ -1437,7 +1426,7 @@ useEffect(() => {
     };
     window.addEventListener("wheel", preventBrowserZoom, {
       passive: false,
-    });    return () => {
+    }); return () => {
       canvas.removeEventListener("wheel", handleWheel);
       window.removeEventListener("wheel", preventBrowserZoom);
     };
@@ -1445,18 +1434,18 @@ useEffect(() => {
   // Helper function to start laser pointer animation
   const startLaserAnimation = useCallback(() => {
     if (laserAnimationRef.current) return; // Already running
-      const animate = () => {
+    const animate = () => {
       const now = Date.now();
       // Only remove points that are well beyond the fade duration to prevent memory leaks
       const keepPoints = laserTrailRef.current.filter(
         point => now - point.timestamp < LASER_FADE_DURATION + 1500 // Keep for 1.5 extra seconds
       );
-      
+
       // Force re-render for smooth fading even if no points were removed
       // This ensures the canvas updates continuously for smooth opacity transitions
       laserTrailRef.current = keepPoints;
       setLaserTrail([...keepPoints]); // Create new array reference to trigger re-render
-      
+
       // Continue animation if there are any points (even fading ones)
       if (keepPoints.length > 0) {
         laserAnimationRef.current = requestAnimationFrame(animate);
@@ -1464,7 +1453,7 @@ useEffect(() => {
         laserAnimationRef.current = null; // Stop animation when no points left
       }
     };
-    
+
     laserAnimationRef.current = requestAnimationFrame(animate);
   }, []);
 
@@ -1479,21 +1468,21 @@ useEffect(() => {
   }, []);  // Helper function to add point to laser trail
   const addLaserPoint = useCallback((x, y) => {
     const currentStrokeId = currentStrokeIdRef.current || Date.now();
-    const newPoint = { 
-      x, 
-      y, 
+    const newPoint = {
+      x,
+      y,
       timestamp: Date.now(),
-      strokeId: currentStrokeId 
+      strokeId: currentStrokeId
     };
-    
+
     // Ensure laserTrailRef.current is an array
     if (!Array.isArray(laserTrailRef.current)) {
       laserTrailRef.current = [];
     }
-    
+
     laserTrailRef.current = [...laserTrailRef.current, newPoint];
     setLaserTrail(laserTrailRef.current);
-    
+
     // Start animation if not already running
     startLaserAnimation();
   }, [startLaserAnimation]);
