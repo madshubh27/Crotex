@@ -2,7 +2,7 @@
   "scripts": {
     "client": "npm --prefix client run dev",
     "server": "npm --prefix server run dev",
-    "build": "cd client && npm install && npm run build -- --outDir ../dist",
+    "build": "cd client && npm install && npm run build -- --outDir ../public",
     "postinstall": "cd client && npm install && cd ../server && npm install"
   },
   "dependencies": {
