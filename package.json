@@ -2,6 +2,6 @@
   "scripts": {
     "client": "npm --prefix client run dev",
     "server": "npm --prefix server run dev",
-    "build": "cd client && npm install && npm run build -- --outDir ../public"
+    "build": "cd client && npm install && npm run build -- --outDir ../dist"
   }
 }
