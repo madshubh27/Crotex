@@ -1,7 +1,7 @@
 import { io } from "socket.io-client";
 
 // Get server URL from environment variable or use default
-const SOCKET_URL = "http://localhost:8080"; // Hardcode for now to eliminate variables
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:8080";
 console.log("Connecting to Socket.IO server at:", SOCKET_URL);
 
 // Create socket with minimal configuration

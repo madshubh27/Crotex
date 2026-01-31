@@ -4,7 +4,7 @@ import axios from 'axios';
 const AuthContext = createContext();
 
 // Configure axios defaults
-const API_BASE_URL = 'http://localhost:8080/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api';
 axios.defaults.baseURL = API_BASE_URL;
 
 // Add request interceptor to include auth token
@@ -76,17 +76,17 @@ export const AuthProvider = ({ children }) => {
       setLoading(true);
 
       const response = await axios.post('/auth/signup', userData);
-      
+
       if (response.data.success) {
         const { user, token } = response.data.data;
-        
+
         // Save to localStorage
         localStorage.setItem('authToken', token);
         localStorage.setItem('user', JSON.stringify(user));
-        
+
         // Update state
         setUser(user);
-        
+
         return { success: true, user };
       } else {
         throw new Error(response.data.message || 'Signup failed');
@@ -106,17 +106,17 @@ export const AuthProvider = ({ children }) => {
       setLoading(true);
 
       const response = await axios.post('/auth/login', credentials);
-      
+
       if (response.data.success) {
         const { user, token } = response.data.data;
-        
+
         // Save to localStorage
         localStorage.setItem('authToken', token);
         localStorage.setItem('user', JSON.stringify(user));
-        
+
         // Update state
         setUser(user);
-        
+
         return { success: true, user };
       } else {
         throw new Error(response.data.message || 'Login failed');
@@ -143,7 +143,7 @@ export const AuthProvider = ({ children }) => {
       localStorage.removeItem('user');
       setUser(null);
       setError(null);
-      
+
       // Refresh the page to clear any app state
       window.location.reload();
     }
@@ -188,7 +188,7 @@ export const AuthProvider = ({ children }) => {
 
 // Add PropTypes validation
 AuthProvider.propTypes = {
-  children: function(props, propName) {
+  children: function (props, propName) {
     if (props[propName] === undefined) {
       return new Error('Missing required prop: children');
     }

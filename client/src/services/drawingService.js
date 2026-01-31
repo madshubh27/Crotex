@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:8080/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api';
 
 class DrawingService {
   constructor() {
@@ -17,15 +17,15 @@ class DrawingService {
   async saveDrawing(sessionId, data) {
     try {
       console.log('[DrawingService] Saving drawing for session:', sessionId, 'Elements count:', data?.length || 0);
-      
+
       const response = await axios.post(`${this.baseURL}/${sessionId}`, {
         data: data
       }, {
         headers: this.getAuthHeaders()
       });
-      
+
       console.log('[DrawingService] Save response:', response.data);
-      
+
       if (response.data.success) {
         return response.data.data.drawing;
       } else {
@@ -35,8 +35,8 @@ class DrawingService {
       console.error('[DrawingService] Save drawing error:', error);
       console.error('[DrawingService] Error response:', error.response?.data);
       throw new Error(
-        error.response?.data?.message || 
-        error.message || 
+        error.response?.data?.message ||
+        error.message ||
         'Failed to save drawing'
       );
     }
@@ -48,7 +48,7 @@ class DrawingService {
       const response = await axios.get(`${this.baseURL}/${sessionId}`, {
         headers: this.getAuthHeaders()
       });
-      
+
       if (response.data.success) {
         return response.data.data.drawing;
       } else {
@@ -59,11 +59,11 @@ class DrawingService {
       if (error.response?.status === 404) {
         return null;
       }
-      
+
       console.error('Get drawing error:', error);
       throw new Error(
-        error.response?.data?.message || 
-        error.message || 
+        error.response?.data?.message ||
+        error.message ||
         'Failed to load drawing'
       );
     }
@@ -75,7 +75,7 @@ class DrawingService {
       const response = await axios.get(`${this.baseURL}?page=${page}&limit=${limit}`, {
         headers: this.getAuthHeaders()
       });
-      
+
       if (response.data.success) {
         return response.data.data;
       } else {
@@ -84,8 +84,8 @@ class DrawingService {
     } catch (error) {
       console.error('Get user drawings error:', error);
       throw new Error(
-        error.response?.data?.message || 
-        error.message || 
+        error.response?.data?.message ||
+        error.message ||
         'Failed to load drawings'
       );
     }
@@ -97,7 +97,7 @@ class DrawingService {
       const response = await axios.delete(`${this.baseURL}/${sessionId}`, {
         headers: this.getAuthHeaders()
       });
-      
+
       if (response.data.success) {
         return true;
       } else {
@@ -106,8 +106,8 @@ class DrawingService {
     } catch (error) {
       console.error('Delete drawing error:', error);
       throw new Error(
-        error.response?.data?.message || 
-        error.message || 
+        error.response?.data?.message ||
+        error.message ||
         'Failed to delete drawing'
       );
     }
@@ -118,15 +118,15 @@ class DrawingService {
     try {
       // Generate a unique session ID
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
+
       // Save empty drawing to create the session
       const drawing = await this.saveDrawing(sessionId, []);
-      
+
       // Update metadata if provided
       if (title !== 'Untitled Drawing') {
         drawing.metadata = { ...drawing.metadata, title };
       }
-      
+
       return {
         sessionId,
         ...drawing
@@ -154,11 +154,11 @@ class DrawingService {
           try {
             // Wait for any previous save to complete
             await lastSavePromise;
-            
+
             // Perform the save
             lastSavePromise = this.saveDrawing(sessionId, data);
             const result = await lastSavePromise;
-            
+
             resolve(result);
           } catch (error) {
             reject(error);
@@ -180,12 +180,12 @@ class DrawingService {
         retryCount = 0; // Reset retry count on success
       } catch (error) {
         retryCount++;
-        
+
         if (retryCount <= maxRetries) {
           // Exponential backoff: wait 2^retryCount seconds before next attempt
           const delay = Math.pow(2, retryCount) * 1000;
           console.warn(`Auto-save failed, retrying in ${delay}ms (attempt ${retryCount}/${maxRetries})`);
-          
+
           setTimeout(() => {
             this.createAutoSave(sessionId, onError)(data);
           }, delay);
